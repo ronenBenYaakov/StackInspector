@@ -1,11 +1,10 @@
-#include "StackInspector.hpp"
+#include "StackInspector.cpp" // or include the header if you split .hpp/.cpp
 #include <iostream>
-#include <string>
 #include <cstdlib>
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "usage: " << argv[0] 
+        std::cerr << "usage: " << argv[0]
                   << " <pid> <executable>\n";
         return 1;
     }
@@ -14,7 +13,7 @@ int main(int argc, char** argv) {
     std::string exe = argv[2];
 
     StackInspector inspector(pid, exe);
-    inspector.inspect(10);
+    inspector.inspect();
 
     return 0;
 }

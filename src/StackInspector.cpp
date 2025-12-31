@@ -1,97 +1,115 @@
-#include "StackInspector.hpp"
+#include "DWARFParser.hpp"
 
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <sys/user.h>
 #include <unistd.h>
+#include <errno.h>
+
 #include <iostream>
 #include <iomanip>
 #include <sstream>
+#include <vector>
+#include <cstdint>
 #include <fstream>
-#include <cerrno>
-#include <cstring>
 
-StackInspector::ProcMaps::ProcMaps(pid_t pid, const std::string& exe) {
-    std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
-    std::string line;
-    while (std::getline(maps, line)) {
-        if (line.find(exe) == std::string::npos) continue;
-        if (line.find("r-xp") == std::string::npos) continue;
-        auto dash = line.find('-');
-        base_ = std::stoull(line.substr(0, dash), nullptr, 16);
-        pie_ = (base_ != 0x400000);
-        break;
-    }
-}
+class StackInspector {
+public:
+    StackInspector(pid_t pid, const std::string& exe)
+        : pid(pid), exe(exe), dwarf(exe) {}
 
-uintptr_t StackInspector::ProcMaps::normalize(uintptr_t rip) const { 
-    return pie_ ? rip - base_ : rip; 
-}
+    void inspect(int maxFrames = 10) {
+        attach();
+        user_regs_struct regs{};
+        ptrace(PTRACE_GETREGS, pid, nullptr, &regs);
 
-bool StackInspector::ProcMaps::pie() const { return pie_; }
-uintptr_t StackInspector::ProcMaps::base() const { return base_; }
+        uintptr_t rip = regs.rip;
+        uintptr_t rbp = regs.rbp;
 
-StackInspector::StackInspector(pid_t pid, const std::string& exe)
-    : pid_(pid), exe_(exe), maps_(pid, exe) {}
+        std::cout << "\n=== Stack Trace (PID " << pid << ") ===\n";
+        std::cout << "PIE: " << (isPIE() ? "YES" : "NO") 
+                  << "  base=0x" << std::hex << exeBase() << std::dec << "\n";
 
-uintptr_t StackInspector::peek(uintptr_t addr) {
-    errno = 0;
-    long val = ptrace(PTRACE_PEEKDATA, pid_, addr, nullptr);
-    return errno ? 0 : static_cast<uintptr_t>(val);
-}
+        for (int frame = 0; frame < maxFrames && rbp; ++frame) {
+            std::cout << "\n[Frame " << frame << "]\n";
+            std::cout << "  RIP: 0x" << std::hex << rip << std::dec << "\n";
 
-std::string StackInspector::addr2line(uintptr_t addr) {
-    std::stringstream cmd;
-    cmd << "addr2line -f -C -e " << exe_ 
-        << " 0x" << std::hex << maps_.normalize(addr);
-    FILE* f = popen(cmd.str().c_str(), "r");
-    if (!f) return "??";
-    char buf[256]; std::string out;
-    while (fgets(buf, sizeof(buf), f)) out += buf;
-    pclose(f);
-    while (!out.empty() && out.back() == '\n') out.pop_back();
-    return out.empty() ? "??" : out;
-}
+            auto fnInfo = dwarf.lookup(rip);
+            std::cout << "  Function: " << fnInfo.name << " ("
+                      << fnInfo.file << ":" << fnInfo.line << ")\n";
 
-void StackInspector::inspect(int maxFrames) {
-    ptrace(PTRACE_ATTACH, pid_, nullptr, nullptr);
-    waitpid(pid_, nullptr, 0);
+            // Print arguments
+            std::cout << "  Arguments:\n";
+            for (size_t i = 0; i < fnInfo.args.size(); ++i) {
+                uintptr_t val = peek(rbp + 16 + i * 8);
+                std::cout << "    " 
+                            << fnInfo.args[i].type << " " 
+                            << fnInfo.args[i].name 
+                            << "\n"
+                            << " = 0x" << std::hex << val << std::dec << "\n";
+            }
 
-    user_regs_struct regs{};
-    ptrace(PTRACE_GETREGS, pid_, nullptr, &regs);
+            // Print locals (raw)
+            std::cout << "  Locals:\n";
+            for (int i = 0; i < 6; ++i) {
+                uintptr_t loc = peek(rbp - (i + 1) * 8);
+                std::cout << "    [rbp-" << (i + 1) * 8
+                          << "] = 0x" << std::hex << loc << std::dec << "\n";
+            }
 
-    uintptr_t rip = regs.rip;
-    uintptr_t rbp = regs.rbp;
+            // next frame
+            uintptr_t next_rip = peek(rbp + 8);
+            uintptr_t next_rbp = peek(rbp);
 
-    std::cout << "\n=== Stack Trace (PID " << pid_ << ") ===\n";
-    std::cout << "PIE: " << (maps_.pie() ? "YES" : "NO")
-              << "  base=0x" << std::hex << maps_.base() << std::dec << "\n";
-
-    for (int frame = 0; frame < maxFrames && rbp; ++frame) {
-        std::cout << "\n[Frame " << frame << "]\n";
-        std::cout << "  RIP: 0x" << std::hex << rip << std::dec << "\n";
-        std::cout << "  Symbol:\n    " << addr2line(rip) << "\n";
-
-        std::cout << "  Stack args:\n";
-        for (int i = 0; i < 6; ++i) {
-            uintptr_t arg = peek(rbp + 16 + i * 8);
-            std::cout << "    arg" << i << " = 0x" 
-                      << std::hex << arg << std::dec << "\n";
+            rip = next_rip;
+            rbp = next_rbp;
         }
 
-        std::cout << "  Locals:\n";
-        for (int i = 0; i < 6; ++i) {
-            uintptr_t v = peek(rbp - (i + 1) * 8);
-            std::cout << "    [rbp-" << (i + 1) * 8 
-                      << "] = 0x" << std::hex << v << std::dec << "\n";
-        }
-
-        uintptr_t nextRip = peek(rbp + 8);
-        uintptr_t nextRbp = peek(rbp);
-        rip = nextRip;
-        rbp = nextRbp;
+        detach();
+        std::cout << "\n[Detached]\n";
     }
 
-    ptrace(PTRACE_DETACH, pid_, nullptr, nullptr);
-    std::cout << "\n[Detached]\n";
-}
+private:
+    pid_t pid;
+    std::string exe;
+    DWARFParser dwarf;
+
+    void attach() {
+        ptrace(PTRACE_ATTACH, pid, nullptr, nullptr);
+        waitpid(pid, nullptr, 0);
+    }
+
+    void detach() {
+        ptrace(PTRACE_DETACH, pid, nullptr, nullptr);
+    }
+
+    uintptr_t peek(uintptr_t addr) {
+        errno = 0;
+        long val = ptrace(PTRACE_PEEKDATA, pid, addr, nullptr);
+        if (errno) return 0;
+        return static_cast<uintptr_t>(val);
+    }
+
+    bool isPIE() {
+        // quick check if executable is PIE
+        return exeBase() != 0;
+    }
+
+    uintptr_t exeBase() {
+        // read /proc/<pid>/maps first line
+        std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
+        if (!maps.is_open()) return 0;
+        std::string line;
+        if (std::getline(maps, line)) {
+            std::istringstream iss(line);
+            std::string addr;
+            if (iss >> addr) {
+                auto dash = addr.find('-');
+                if (dash != std::string::npos) {
+                    return std::stoull(addr.substr(0, dash), nullptr, 16);
+                }
+            }
+        }
+        return 0;
+    }
+};
