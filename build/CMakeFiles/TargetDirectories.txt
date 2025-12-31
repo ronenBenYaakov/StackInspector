@@ -1,3 +1,0 @@
-/home/ronen/StackInspector/build/CMakeFiles/stack_inspector.dir
-/home/ronen/StackInspector/build/CMakeFiles/edit_cache.dir
-/home/ronen/StackInspector/build/CMakeFiles/rebuild_cache.dir

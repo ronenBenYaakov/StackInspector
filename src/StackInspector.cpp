@@ -11,7 +11,6 @@
 #include <cerrno>
 #include <cstring>
 
-/* =============== ProcMaps =============== */
 StackInspector::ProcMaps::ProcMaps(pid_t pid, const std::string& exe) {
     std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
     std::string line;
@@ -32,7 +31,6 @@ uintptr_t StackInspector::ProcMaps::normalize(uintptr_t rip) const {
 bool StackInspector::ProcMaps::pie() const { return pie_; }
 uintptr_t StackInspector::ProcMaps::base() const { return base_; }
 
-/* =============== StackInspector =============== */
 StackInspector::StackInspector(pid_t pid, const std::string& exe)
     : pid_(pid), exe_(exe), maps_(pid, exe) {}
 
