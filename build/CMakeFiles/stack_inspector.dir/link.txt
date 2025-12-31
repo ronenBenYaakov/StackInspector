@@ -1,0 +1,1 @@
+/usr/bin/c++ -g -O0  -no-pie CMakeFiles/stack_inspector.dir/src/external_inspector.cpp.o -o stack_inspector 
